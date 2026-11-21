@@ -36,6 +36,23 @@ struct ProtocolChecks {
         try check(SliderLogic.position(value: 80, maximum: 50) == 1)
         try check(SliderLogic.position(value: 1, maximum: 0) == 0)
     }
+    func testColorModes() throws {
+        let expected: [(UInt16, String)] = [
+            (15, "M-book"), (10, "sRGB"), (34, "Display P3"),
+            (18, "使用者"), (40, "遊戲"), (50, "劇院")
+        ]
+        try check(ColorModeLogic.vcp == 0xDC)
+        try check(ColorModeLogic.modes.count == expected.count)
+        for (index, mode) in expected.enumerated() {
+            try check(ColorModeLogic.modes[index].value == mode.0)
+            try check(ColorModeLogic.modes[index].name == mode.1)
+            try check(ColorModeLogic.selectedIndex(for: mode.0) == index)
+        }
+        for value: UInt16 in [0, 0x23, 0x27, 0xFFFF] {
+            try check(ColorModeLogic.selectedIndex(for: value) == nil)
+        }
+        try check(ColorModeLogic.selectedIndex(for: nil) == nil)
+    }
     func testThrottle() throws {
         try check(SliderLogic.shouldWrite(now: 0, lastWrite: nil, isFinal: false))
         try check(!SliderLogic.shouldWrite(now: 0.08, lastWrite: 0, isFinal: false))
@@ -135,6 +152,7 @@ func runSelfTests() throws {
     let tests = ProtocolChecks()
     let groups: [(String, () throws -> Void)] = [
         ("slider mapping and reported maxima", tests.testSliderLogic),
+        ("color mode mapping and unknown readings", tests.testColorModes),
         ("throttle and final release", tests.testThrottle),
         ("known request vectors", tests.testKnownRequestVectors),
         ("reply vectors, zero, 16-bit values", tests.testKnownReplyAndZero),

@@ -19,7 +19,7 @@ private final class DDCWorker: @unchecked Sendable {
     private var readings = controls.map { Reading(maximum: $0.fallback) }
     private var lastWrite: Double?
 
-    func refresh(completion: @escaping @MainActor @Sendable (String, Bool, [Reading]) -> Void) {
+    func refresh(completion: @escaping @MainActor @Sendable (String, Bool, [Reading], UInt16?) -> Void) {
         queue.async { [self] in
             let candidates = (try? DDCDisplay.list())?.filter { $0.info.available } ?? []
             let selected = candidates.count == 1 ? candidates[0] : nil
@@ -29,6 +29,7 @@ private final class DDCWorker: @unchecked Sendable {
             }
             display = selected
             var title = candidates.count > 1 ? "偵測到多個螢幕，暫不支援選擇" : "沒有偵測到可控制的螢幕"
+            var colorMode: UInt16?
             if let display {
                 title = display.info.name
                 // Some monitors reject Get immediately after Set. This is a bounded
@@ -44,13 +45,32 @@ private final class DDCWorker: @unchecked Sendable {
                             known: true)
                     } else { readings[index].known = false }
                 }
+                colorMode = (try? display.read(vcp: ColorModeLogic.vcp))?.current
             } else {
                 for index in readings.indices { readings[index].known = false }
             }
             let snapshot = readings
             let enabled = display != nil
             let message = title
-            DispatchQueue.main.async { completion(message, enabled, snapshot) }
+            let modeSnapshot = colorMode
+            DispatchQueue.main.async { completion(message, enabled, snapshot, modeSnapshot) }
+        }
+    }
+
+    func writeColorMode(value: UInt16,
+                        completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        queue.async { [self] in
+            var succeeded = false
+            if let display {
+                lastWrite = ProcessInfo.processInfo.systemUptime
+                do {
+                    try display.write(vcp: ColorModeLogic.vcp, value: value, repetitions: 1)
+                    succeeded = true
+                } catch { /* Clear the optimistic check on transport failure. */ }
+            }
+            // No readback: changing mode can temporarily make the monitor reject Get.
+            let result = succeeded
+            DispatchQueue.main.async { completion(result) }
         }
     }
 
@@ -131,6 +151,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private let info = NSMenuItem(title: "開啟選單以偵測螢幕", action: nil, keyEquivalent: "")
     private var rows: [SliderRow] = []
     private var refreshing = false
+    private var colorModeItems: [NSMenuItem] = []
+    private var colorModeRevision = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -160,10 +182,44 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        let colorMenu = NSMenu()
+        colorMenu.autoenablesItems = false
+        for (index, mode) in ColorModeLogic.modes.enumerated() {
+            let item = NSMenuItem(title: mode.name, action: #selector(selectColorMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.isEnabled = false
+            colorModeItems.append(item)
+            colorMenu.addItem(item)
+        }
+        let colorItem = NSMenuItem(title: "色彩模式", action: nil, keyEquivalent: "")
+        colorItem.submenu = colorMenu
+        menu.addItem(colorItem)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "結束", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
         statusItem.menu = menu
+    }
+
+    private func applyColorMode(_ value: UInt16?) {
+        let selected = ColorModeLogic.selectedIndex(for: value)
+        for (index, item) in colorModeItems.enumerated() {
+            item.state = index == selected ? .on : .off
+        }
+    }
+
+    @objc private func selectColorMode(_ sender: NSMenuItem) {
+        guard !refreshing, sender.isEnabled,
+              ColorModeLogic.modes.indices.contains(sender.tag) else { return }
+        let value = ColorModeLogic.modes[sender.tag].value
+        colorModeRevision += 1
+        let revision = colorModeRevision
+        applyColorMode(value)
+        worker.writeColorMode(value: value) { [weak self] succeeded in
+            guard let self, self.colorModeRevision == revision else { return }
+            if !succeeded { self.applyColorMode(nil) }
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -171,10 +227,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refreshing = true
         info.title = "正在讀取螢幕…"
         for row in rows { row.slider.isEnabled = false; row.revision += 1 }
-        worker.refresh { [weak self] title, enabled, readings in
+        colorModeRevision += 1
+        for item in colorModeItems { item.isEnabled = false }
+        worker.refresh { [weak self] title, enabled, readings, colorMode in
             guard let self else { return }
             self.refreshing = false
             self.info.title = title
+            self.applyColorMode(colorMode)
+            for item in self.colorModeItems { item.isEnabled = enabled }
             for (row, reading) in zip(self.rows, readings) {
                 row.apply(reading)
                 row.slider.isEnabled = enabled
