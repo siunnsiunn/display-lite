@@ -20,6 +20,26 @@ struct ProtocolChecks {
     func attempt(_ raw: [UInt8], write: Int32 = 0, read: Int32? = 0) -> ReadAttempt {
         ReadAttempt(number: 1, raw: raw, writeStatus: write, readStatus: read, vcp: 0x10)
     }
+    func testHUD() throws {
+        let actions: [MediaAction] = [.volume(1), .volume(-1), .toggleMute, .brightness(1), .brightness(-1)]
+        for action in actions {
+            for source: HUDSource in [.sync, .slider] {
+                try check(HUDLogic.content(action: action, value: 25, maximum: 50, muted: false, source: source) == nil)
+            }
+            let result = HUDLogic.content(action: action, value: 25, maximum: 50, muted: false, source: .key)
+            try check(result?.value == 25 && result?.progress == 0.5)
+        }
+        try check(HUDLogic.content(action: .passThrough, value: 1, maximum: 50, muted: false, source: .key) == nil)
+        for action: MediaAction in [.volume(1), .toggleMute] {
+            let muted = HUDLogic.content(action: action, value: 25, maximum: 50, muted: true, source: .key)
+            try check(muted?.symbol == "speaker.slash.fill" && muted?.progress == 0 && muted?.value == 25)
+            try check(HUDLogic.content(action: action, value: 25, maximum: 50, muted: false, source: .key)?.symbol == "speaker.wave.2.fill")
+        }
+        let bright = HUDLogic.content(action: .brightness(1), value: 25, maximum: 50, muted: true, source: .key)
+        try check(bright?.symbol == "sun.max.fill" && bright?.progress == 0.5)
+        try check(HUDLogic.content(action: .volume(1), value: 1, maximum: 0, muted: false, source: .key)?.progress == 0)
+        try check(HUDLogic.content(action: .volume(1), value: 65535, maximum: 50, muted: false, source: .key)?.progress == 1)
+    }
     func testMediaPolicy() throws {
         for output in [false, true] {
             for builtin in [false, true] {
@@ -211,6 +231,7 @@ struct ProtocolChecks {
 func runSelfTests() throws {
     let tests = ProtocolChecks()
     let groups: [(String, () throws -> Void)] = [
+        ("HUD source filtering, symbols, mute and progress", tests.testHUD),
         ("media key decoding, routing and mute", tests.testMediaPolicy),
         ("media steps, clamp, sync mapping and final intent", tests.testMediaStepsAndSync),
         ("slider mapping and reported maxima", tests.testSliderLogic),

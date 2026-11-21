@@ -50,7 +50,7 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="
 
 ## 測試結果
 
-本機 CLT 的 `swift test` 無法匯入 `XCTest` 或 `Testing`，因此依備案使用 `ddcprobe selftest`，不保留無法編譯的 test target。`Sources/ddcprobe/SelfTest.swift` 包含 12 組純函式檢查：媒體鍵解碼／條件路由／靜音切換、步進／夾限／亮度同步換算／連發累積與放開最終值、色彩模式對照／選取與未知值、滑桿範圍／換算、90ms 節流與放開強制送出、獨立已知封包向量、checksum／長度／VCP／狀態錯誤、零值與衝突採信、I2C 失敗排除、分段 offset／拼接／空段與 NUL 終止／溢位，以及完整 32-byte 分段。selftest 不枚舉或存取螢幕；檢查失敗會以非零狀態結束，release build 也不會移除檢查。
+本機 CLT 的 `swift test` 無法匯入 `XCTest` 或 `Testing`，因此依備案使用 `ddcprobe selftest`，不保留無法編譯的 test target。`Sources/ddcprobe/SelfTest.swift` 包含 13 組純函式檢查：HUD 來源過濾／圖示／靜音／進度邊界、媒體鍵解碼／條件路由／靜音切換、步進／夾限／亮度同步換算／連發累積與放開最終值、色彩模式對照／選取與未知值、滑桿範圍／換算、90ms 節流與放開強制送出、獨立已知封包向量、checksum／長度／VCP／狀態錯誤、零值與衝突採信、I2C 失敗排除、分段 offset／拼接／空段與 NUL 終止／溢位，以及完整 32-byte 分段。selftest 不枚舉或存取螢幕；檢查失敗會以非零狀態結束，release build 也不會移除檢查。
 
 ## DisplayLite 選單列程式
 
@@ -85,7 +85,7 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="
 
 ## 系統媒體鍵與亮度同步
 
-全程事件驅動：沒有輪詢、常駐或週期性計時器。DDC 讀取、寫入（包含靜音、按鍵及同步）全部經過同一條序列佇列；CGEventTap 回呼不做 DDC 收發。唯一的延遲排程是事件觸發的一次性工作：亮度同步節流尾端送出、亮度鍵退回讀取（120ms），及螢幕配置事件合併（250ms）。事件停止後不會自行再排程。
+全程事件驅動：沒有輪詢、常駐或週期性計時器。DDC 讀取、寫入（包含靜音、按鍵及同步）全部經過同一條序列佇列；CGEventTap 回呼不做 DDC 收發。唯一的延遲排程是事件觸發的一次性工作：亮度同步節流尾端送出、亮度鍵退回讀取（120ms），螢幕配置事件合併（250ms），以及 HUD 最後一次按鍵後的隱藏（1 秒）。事件停止後不會自行再排程。
 
 ### 權限與按鍵
 
@@ -98,7 +98,7 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="
 - 沒有內建螢幕在線上時，亮度加減控制外接螢幕；有內建螢幕時原樣放行，由亮度同步跟隨。透過 `CGGetOnlineDisplayList` 與 `CGDisplayIsBuiltin` 判斷；枚舉失敗不當作闔蓋。
 - 一格是 `round(max / 16)`，限制在 `0...max`。BenQ MA270U 已實測亮度 `0x10` 為 0–100（每格 6），音量 `0x62` 為 0–50（每格 3）。連發累積目標值，沿用 90ms 節流，放開強制送出最後值。
 - 靜音用 `0x8D`，首次按下讀取目前狀態，之後切換快取；連發不重複切換。能力字串提供 01／02，目前實測讀到 2；**1＝靜音、2＝未靜音是依 MCCS 慣例的推測，尚未實測確認**。讀取失敗或未知值不猜測切換方向。
-- **不提供音量／亮度浮動提示（HUD）**；放行給系統的按鍵仍可能顯示 macOS 自己的 HUD。
+- 程式攔下並處理的音量加減、靜音切換及闔蓋亮度加減會顯示自繪 HUD：220×56 pt 圓角半透明面板，包含圖示、進度條與目標數值；靜音時換圖示並清空進度條。顯示值採樂觀更新，不為 HUD 額外讀取螢幕。面板位於被控制外接螢幕的水平中央、底部約 1/8 高度，優先比對 UUID，否則使用唯一外接螢幕，無法定位時使用主螢幕。面板不搶焦點、不攔滑鼠，可跨 Space 與全螢幕 app；支援深淺色外觀。每次按鍵更新並取消先前的一次性隱藏工作，最後一次按鍵 1 秒後以 0.2 秒淡出並隱藏；重用同一面板，隱藏後沒有計時或輪詢工作。亮度跟隨同步、選單滑桿及放行給系統的按鍵不觸發此 HUD；macOS 仍可顯示自己的提示。HUD 僅使用公開 AppKit，不呼叫系統私有 OSD。
 
 ### 亮度跟隨 MacBook
 

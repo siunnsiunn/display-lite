@@ -53,6 +53,7 @@ private final class DDCWorker: @unchecked Sendable {
     }
 
     func media(_ action: MediaAction, down: Bool, repeated: Bool,
+               hud: @escaping @MainActor @Sendable (HUDContent, DisplayInfo) -> Void,
                completion: @escaping @MainActor @Sendable (Int, Reading) -> Void) {
         queue.async { [self] in
             guard let display else { return }
@@ -64,6 +65,10 @@ private final class DDCWorker: @unchecked Sendable {
                 guard down, !repeated else { return }
                 if mute == nil { mute = (try? display.read(vcp: 0x8D))?.current }
                 guard let mute, let next = MediaKeyLogic.toggledMute(mute) else { return }
+                let content = HUDLogic.content(action: action, value: readings[2].value,
+                    maximum: readings[2].maximum, muted: next == 1, source: .key)
+                let info = display.info
+                if let content { DispatchQueue.main.async { hud(content, info) } }
                 lastWrite = ProcessInfo.processInfo.systemUptime
                 do { try display.write(vcp: 0x8D, value: next, repetitions: 1); self.mute = next }
                 catch { self.mute = nil }
@@ -82,6 +87,11 @@ private final class DDCWorker: @unchecked Sendable {
                 desired[index] = MediaKeyLogic.step(value: desired[index]!, maximum: readings[index].maximum, direction: direction)
             }
             let target = desired[index]!
+            if down, let content = HUDLogic.content(action: action, value: target,
+                maximum: readings[index].maximum, muted: mute == 1, source: .key) {
+                let info = display.info
+                DispatchQueue.main.async { hud(content, info) }
+            }
             // Accumulate even events skipped by the throttle; release flushes the target.
             send(index: index, value: target, final: !down) { completion(index, $0) }
             if !down { desired[index] = nil }
@@ -238,6 +248,7 @@ private final class SliderRow: NSView {
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let worker = DDCWorker()
+    private let hud = MediaHUD()
     private let info = NSMenuItem(title: "開啟選單以偵測螢幕", action: nil, keyEquivalent: "")
     private var rows: [SliderRow] = []
     private var refreshing = false
@@ -313,7 +324,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             switch action { case .volume: index = 2; case .brightness: index = 0; default: index = nil }
             if let index { self.rows[index].revision += 1 }
             let revision = index.map { self.rows[$0].revision }
-            self.worker.media(action, down: down, repeated: repeated) { [weak self] index, reading in
+            let topology = self.topologyRevision
+            self.worker.media(action, down: down, repeated: repeated, hud: { [weak self] content, display in
+                guard let self, self.topologyRevision == topology else { return }
+                self.hud.show(content, display: display)
+            }) { [weak self] index, reading in
                 guard let self, self.rows[index].revision == revision else { return }
                 self.rows[index].apply(reading)
             }
@@ -330,6 +345,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         system.topologyWillChange = { [weak self] in
             guard let self else { return }
             self.topologyRevision += 1
+            self.hud.hide()
             self.worker.invalidateDisplay()
             for row in self.rows { row.revision += 1; row.slider.isEnabled = false }
             for item in self.colorModeItems { item.isEnabled = false }
@@ -340,7 +356,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         refresh(syncAfter: true)
     }
 
-    func applicationWillTerminate(_ notification: Notification) { system.stop() }
+    func applicationWillTerminate(_ notification: Notification) { hud.hide(); system.stop() }
     @objc private func requestKeyboardPermission() { system.requestPermission() }
     @objc private func toggleFollow() {
         system.follow.toggle()
