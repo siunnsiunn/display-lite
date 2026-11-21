@@ -18,12 +18,109 @@ private final class DDCWorker: @unchecked Sendable {
     private var display: DDCDisplay?
     private var readings = controls.map { Reading(maximum: $0.fallback) }
     private var lastWrite: Double?
+    private var desired: [Int: UInt16] = [:]
+    private var mute: UInt16?
+    private var pendingSync: DispatchWorkItem?
+    private var syncGeneration = 0
+
+    private func cancelSync() {
+        pendingSync?.cancel(); pendingSync = nil
+        syncGeneration += 1
+    }
+    func cancelBrightnessSync() { queue.async { self.cancelSync() } }
+    func invalidateDisplay() {
+        queue.async {
+            self.cancelSync()
+            self.display = nil
+            self.desired.removeAll()
+            self.mute = nil
+        }
+    }
+
+    private func send(index: Int, value: UInt16, final: Bool,
+                      completion: @escaping @MainActor @Sendable (Reading) -> Void) {
+        guard let display else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard SliderLogic.shouldWrite(now: now, lastWrite: lastWrite, isFinal: final) else { return }
+        lastWrite = now
+        do {
+            try display.write(vcp: controls[index].code, value: value, repetitions: 1)
+            readings[index].value = value
+            readings[index].known = true
+        } catch { readings[index].known = false }
+        let snapshot = readings[index]
+        DispatchQueue.main.async { completion(snapshot) }
+    }
+
+    func media(_ action: MediaAction, down: Bool, repeated: Bool,
+               completion: @escaping @MainActor @Sendable (Int, Reading) -> Void) {
+        queue.async { [self] in
+            guard let display else { return }
+            let index: Int, direction: Int
+            switch action {
+            case .volume(let delta): index = 2; direction = delta
+            case .brightness(let delta): index = 0; direction = delta; cancelSync()
+            case .toggleMute:
+                guard down, !repeated else { return }
+                if mute == nil { mute = (try? display.read(vcp: 0x8D))?.current }
+                guard let mute, let next = MediaKeyLogic.toggledMute(mute) else { return }
+                lastWrite = ProcessInfo.processInfo.systemUptime
+                do { try display.write(vcp: 0x8D, value: next, repetitions: 1); self.mute = next }
+                catch { self.mute = nil }
+                return
+            case .passThrough: return
+            }
+            if desired[index] == nil {
+                if !readings[index].known {
+                    guard let value = try? display.read(vcp: controls[index].code) else { return }
+                    readings[index] = Reading(value: value.current,
+                        maximum: SliderLogic.maximum(reported: value.max, fallback: controls[index].fallback), known: true)
+                }
+                desired[index] = readings[index].value
+            }
+            if down {
+                desired[index] = MediaKeyLogic.step(value: desired[index]!, maximum: readings[index].maximum, direction: direction)
+            }
+            let target = desired[index]!
+            // Accumulate even events skipped by the throttle; release flushes the target.
+            send(index: index, value: target, final: !down) { completion(index, $0) }
+            if !down { desired[index] = nil }
+        }
+    }
+
+    func syncBrightness(_ brightness: Double,
+                        completion: @escaping @MainActor @Sendable (Reading) -> Void) {
+        queue.async { [self] in
+            cancelSync()
+            guard display != nil,
+                  let target = MediaKeyLogic.brightness(brightness, maximum: readings[0].maximum),
+                  !readings[0].known || readings[0].value != target else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            if SliderLogic.shouldWrite(now: now, lastWrite: lastWrite, isFinal: false) {
+                send(index: 0, value: target, final: false, completion: completion)
+            } else {
+                let generation = syncGeneration
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.syncGeneration == generation else { return }
+                    self.pendingSync = nil
+                    // One trailing flush per incoming burst, never self-rescheduling.
+                    guard !self.readings[0].known || self.readings[0].value != target else { return }
+                    self.send(index: 0, value: target, final: true, completion: completion)
+                }
+                pendingSync = work
+                queue.asyncAfter(deadline: .now() + max(0, 0.09 - (now - (lastWrite ?? now))), execute: work)
+            }
+        }
+    }
 
     func refresh(completion: @escaping @MainActor @Sendable (String, Bool, [Reading], UInt16?) -> Void) {
         queue.async { [self] in
+            mute = nil
             let candidates = (try? DDCDisplay.list())?.filter { $0.info.available } ?? []
             let selected = candidates.count == 1 ? candidates[0] : nil
             if selected?.info.registryID != display?.info.registryID {
+                cancelSync()
+                desired.removeAll()
                 readings = controls.map { Reading(maximum: $0.fallback) }
                 lastWrite = nil
             }
@@ -77,17 +174,10 @@ private final class DDCWorker: @unchecked Sendable {
     func write(index: Int, value: UInt16, final: Bool,
                completion: @escaping @MainActor @Sendable (Reading) -> Void) {
         queue.async { [self] in
-            guard let display else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            guard SliderLogic.shouldWrite(now: now, lastWrite: lastWrite, isFinal: final) else { return }
-            lastWrite = now
-            do {
-                try display.write(vcp: controls[index].code, value: value, repetitions: 1)
-                readings[index].value = value
-                readings[index].known = true
-            } catch { readings[index].known = false }
-            let snapshot = readings[index]
-            DispatchQueue.main.async { completion(snapshot) }
+            if index == 0 { cancelSync() }
+            desired[index] = value
+            send(index: index, value: value, final: final, completion: completion)
+            if final { desired[index] = nil }
         }
     }
 }
@@ -153,6 +243,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var refreshing = false
     private var colorModeItems: [NSMenuItem] = []
     private var colorModeRevision = 0
+    private let system = SystemControls()
+    private let permissionItem = NSMenuItem(title: "啟用鍵盤按鍵控制（需要輔助使用權限）…", action: nil, keyEquivalent: "")
+    private let followItem = NSMenuItem(title: "亮度跟隨 MacBook", action: nil, keyEquivalent: "")
+    private let syncStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private var topologyRevision = 0
+    private var refreshAgain = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -196,10 +292,73 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         colorItem.submenu = colorMenu
         menu.addItem(colorItem)
         menu.addItem(.separator())
+        UserDefaults.standard.register(defaults: ["followMacBookBrightness": true])
+        system.follow = UserDefaults.standard.bool(forKey: "followMacBookBrightness")
+        permissionItem.target = self
+        permissionItem.action = #selector(requestKeyboardPermission)
+        menu.addItem(permissionItem)
+        followItem.target = self
+        followItem.action = #selector(toggleFollow)
+        menu.addItem(followItem)
+        syncStatus.isEnabled = false
+        menu.addItem(syncStatus)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "結束", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
         statusItem.menu = menu
+        system.action = { [weak self] action, down, repeated in
+            guard let self else { return }
+            let index: Int?
+            switch action { case .volume: index = 2; case .brightness: index = 0; default: index = nil }
+            if let index { self.rows[index].revision += 1 }
+            let revision = index.map { self.rows[$0].revision }
+            self.worker.media(action, down: down, repeated: repeated) { [weak self] index, reading in
+                guard let self, self.rows[index].revision == revision else { return }
+                self.rows[index].apply(reading)
+            }
+        }
+        system.brightness = { [weak self] value in
+            guard let self, self.system.canControl else { return }
+            self.rows[0].revision += 1
+            let revision = self.rows[0].revision
+            self.worker.syncBrightness(value) { [weak self] reading in
+                guard let self, self.rows[0].revision == revision else { return }
+                self.rows[0].apply(reading)
+            }
+        }
+        system.topologyWillChange = { [weak self] in
+            guard let self else { return }
+            self.topologyRevision += 1
+            self.worker.invalidateDisplay()
+            for row in self.rows { row.revision += 1; row.slider.isEnabled = false }
+            for item in self.colorModeItems { item.isEnabled = false }
+        }
+        system.topologyChanged = { [weak self] in self?.refresh(syncAfter: true) }
+        system.statusChanged = { [weak self] in self?.updateSystemMenu() }
+        system.start()
+        refresh(syncAfter: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) { system.stop() }
+    @objc private func requestKeyboardPermission() { system.requestPermission() }
+    @objc private func toggleFollow() {
+        system.follow.toggle()
+        UserDefaults.standard.set(system.follow, forKey: "followMacBookBrightness")
+        worker.cancelBrightnessSync()
+        updateSystemMenu()
+        if system.follow { system.sampleBrightness() }
+    }
+    private func updateSystemMenu() {
+        permissionItem.isHidden = system.trusted && system.tapAvailable
+        permissionItem.title = system.trusted
+            ? "重新啟用鍵盤按鍵控制（事件監聽建立失敗）…"
+            : "啟用鍵盤按鍵控制（需要輔助使用權限）…"
+        followItem.state = system.follow ? .on : .off
+        syncStatus.isHidden = !system.hasBuiltin || !system.follow
+        syncStatus.title = !system.brightnessReadable ? "無法讀取內建螢幕亮度"
+            : system.notificationsAvailable ? "使用內建亮度變化通知"
+            : system.tapAvailable ? "亮度同步僅於亮度按鍵後更新" : "亮度同步需啟用鍵盤按鍵控制"
     }
 
     private func applyColorMode(_ value: UInt16?) {
@@ -223,7 +382,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        guard !refreshing else { return } // Coalesce reopen while the same read is in flight.
+        system.checkPermission()
+        refresh(syncAfter: false)
+    }
+    private func refresh(syncAfter: Bool) {
+        guard !refreshing else {
+            refreshAgain = refreshAgain || syncAfter
+            return
+        }
+        let topology = topologyRevision
         refreshing = true
         info.title = "正在讀取螢幕…"
         for row in rows { row.slider.isEnabled = false; row.revision += 1 }
@@ -232,6 +399,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         worker.refresh { [weak self] title, enabled, readings, colorMode in
             guard let self else { return }
             self.refreshing = false
+            if self.refreshAgain || self.topologyRevision != topology {
+                self.refreshAgain = false
+                self.refresh(syncAfter: true)
+                return
+            }
+            self.system.canControl = enabled
             self.info.title = title
             self.applyColorMode(colorMode)
             for item in self.colorModeItems { item.isEnabled = enabled }
@@ -239,6 +412,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
                 row.apply(reading)
                 row.slider.isEnabled = enabled
             }
+            if syncAfter { self.system.sampleBrightness() }
         }
     }
 }

@@ -20,6 +20,66 @@ struct ProtocolChecks {
     func attempt(_ raw: [UInt8], write: Int32 = 0, read: Int32? = 0) -> ReadAttempt {
         ReadAttempt(number: 1, raw: raw, writeStatus: write, readStatus: read, vcp: 0x10)
     }
+    func testMediaPolicy() throws {
+        for output in [false, true] {
+            for builtin in [false, true] {
+                try check(MediaKeyLogic.action(key: .volumeUp, outputIsDisplay: output, hasBuiltin: builtin) == (output ? .volume(1) : .passThrough))
+                try check(MediaKeyLogic.action(key: .volumeDown, outputIsDisplay: output, hasBuiltin: builtin) == (output ? .volume(-1) : .passThrough))
+                try check(MediaKeyLogic.action(key: .mute, outputIsDisplay: output, hasBuiltin: builtin) == (output ? .toggleMute : .passThrough))
+                try check(MediaKeyLogic.action(key: .brightnessUp, outputIsDisplay: output, hasBuiltin: builtin) == (builtin ? .passThrough : .brightness(1)))
+                try check(MediaKeyLogic.action(key: .brightnessDown, outputIsDisplay: output, hasBuiltin: builtin) == (builtin ? .passThrough : .brightness(-1)))
+            }
+        }
+        for key in MediaKey.allCases {
+            let down = MediaKeyLogic.decode(subtype: 8, data1: key.rawValue << 16 | 0x0a00)
+            let repeated = MediaKeyLogic.decode(subtype: 8, data1: key.rawValue << 16 | 0x0a01)
+            let up = MediaKeyLogic.decode(subtype: 8, data1: key.rawValue << 16 | 0x0b00)
+            try check(down?.key == key && down?.isDown == true && down?.isRepeat == false)
+            try check(repeated?.isDown == true && repeated?.isRepeat == true)
+            try check(up?.key == key && up?.isDown == false)
+        }
+        try check(MediaKeyLogic.decode(subtype: 7, data1: 0x0a00) == nil)
+        try check(MediaKeyLogic.decode(subtype: 8, data1: 99 << 16 | 0x0a00) == nil)
+        try check(MediaKeyLogic.decode(subtype: 8, data1: 0x0c00) == nil)
+        try check(MediaKeyLogic.toggledMute(1) == 2)
+        try check(MediaKeyLogic.toggledMute(2) == 1)
+        try check(MediaKeyLogic.toggledMute(0) == nil)
+        try check(MediaKeyLogic.toggledMute(65535) == nil)
+    }
+    func testMediaStepsAndSync() throws {
+        try check(MediaKeyLogic.step(value: 25, maximum: 50, direction: 1) == 28)
+        try check(MediaKeyLogic.step(value: 25, maximum: 50, direction: -1) == 22)
+        try check(MediaKeyLogic.step(value: 50, maximum: 100, direction: 1) == 56)
+        try check(MediaKeyLogic.step(value: 0, maximum: 100, direction: -1) == 0)
+        try check(MediaKeyLogic.step(value: 49, maximum: 50, direction: 1) == 50)
+        try check(MediaKeyLogic.step(value: 1, maximum: 50, direction: -1) == 0)
+        try check(MediaKeyLogic.step(value: 65535, maximum: 65535, direction: 1) == 65535)
+        try check(MediaKeyLogic.step(value: 65535, maximum: 0, direction: 1) == 0)
+        try check(MediaKeyLogic.step(value: 65535, maximum: 50, direction: -1) == 47)
+        try check(MediaKeyLogic.step(value: 10, maximum: 50, direction: 0) == 10)
+        for maximum: UInt16 in [0, 50, 100, 65535] {
+            try check(MediaKeyLogic.brightness(0, maximum: maximum) == 0)
+            try check(MediaKeyLogic.brightness(1, maximum: maximum) == maximum)
+            try check(MediaKeyLogic.brightness(-1, maximum: maximum) == 0)
+            try check(MediaKeyLogic.brightness(2, maximum: maximum) == maximum)
+        }
+        try check(MediaKeyLogic.brightness(0.505, maximum: 100) == 51)
+        try check(MediaKeyLogic.brightness(0.5, maximum: 50) == 25)
+        try check(MediaKeyLogic.brightness(.nan, maximum: 100) == nil)
+        try check(MediaKeyLogic.brightness(.infinity, maximum: 100) == nil)
+        // Key intent accumulates independently of admitted writes; release sends 43.
+        var desired: UInt16 = 25
+        var last: Double?
+        var sent: [UInt16] = []
+        for now in [0.0, 0.02, 0.04, 0.06, 0.08, 0.10] {
+            desired = MediaKeyLogic.step(value: desired, maximum: 50, direction: 1)
+            if SliderLogic.shouldWrite(now: now, lastWrite: last, isFinal: false) {
+                sent.append(desired); last = now
+            }
+        }
+        if SliderLogic.shouldWrite(now: 0.11, lastWrite: last, isFinal: true) { sent.append(desired) }
+        try check(sent == [28, 43, 43])
+    }
     func testSliderLogic() throws {
         try check(SliderLogic.maximum(reported: nil, fallback: 50) == 50)
         try check(SliderLogic.maximum(reported: 0, fallback: 100) == 100)
@@ -151,6 +211,8 @@ struct ProtocolChecks {
 func runSelfTests() throws {
     let tests = ProtocolChecks()
     let groups: [(String, () throws -> Void)] = [
+        ("media key decoding, routing and mute", tests.testMediaPolicy),
+        ("media steps, clamp, sync mapping and final intent", tests.testMediaStepsAndSync),
         ("slider mapping and reported maxima", tests.testSliderLogic),
         ("color mode mapping and unknown readings", tests.testColorModes),
         ("throttle and final release", tests.testThrottle),

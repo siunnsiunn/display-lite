@@ -5,6 +5,7 @@ import Darwin
 let usage = """
 Usage:
   ddcprobe selftest
+  ddcprobe env
   ddcprobe list
   ddcprobe get <hex-vcp> [--tries N] [--standard-checksum] [--display registry-id]
   ddcprobe set <hex-vcp> <decimal-value> [--display registry-id]
@@ -18,6 +19,7 @@ func run() throws {
     var args = Array(CommandLine.arguments.dropFirst())
     if args.isEmpty || args == ["--help"] || args == ["help"] { print(usage); return }
     if args == ["selftest"] { try runSelfTests(); return }
+    if args == ["env"] { print(environmentReport()); return }
     let command = args.removeFirst()
     guard ["list", "get", "set", "caps", "scan"].contains(command) else { throw DDCError.invalid(usage) }
     var displayID: UInt64?
