@@ -123,3 +123,9 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="
 印出內建螢幕在線狀態、可讀取的內建亮度、上述三個 DisplayServices 符號是否存在、預設音訊輸出裝置名稱／傳輸類型／是否有可設定音量，以及 `AXIsProcessTrusted` 結果。只查詢，不建立 tap、不註冊亮度通知、不跳權限詢問、不讀寫 DDC、不修改系統設定。這是 `ddcprobe` 程序的權限結果，不保證與 DisplayLite 的權限歸屬相同。
 
 既有 debug 版實測基準（使用者提供）：閒置 CPU **0.0%**、idle wakeups **0**、記憶體約 **13 MB**（`top` 的 MEM）。這些數字不是新增功能後重新量測的結果；新增監聽後的資源用量、授權、按住／放開、音訊切換、開闔蓋、通知及退回路徑，由使用者實機測試。
+
+## 授權與致謝
+
+本專案採 [MIT 授權](LICENSE)。
+
+DDC 封包的檢查碼做法參考 [MonitorControl](https://github.com/MonitorControl/MonitorControl)（MIT），DisplayServices 亮度通知的呼叫介面參考 [Lunar](https://github.com/alin23/Lunar)（MIT）。本專案與 BenQ、Apple 無關。
