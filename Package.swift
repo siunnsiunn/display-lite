@@ -6,10 +6,13 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "DDCKit", targets: ["DDCKit"]),
-        .executable(name: "ddcprobe", targets: ["ddcprobe"])
+        .executable(name: "ddcprobe", targets: ["ddcprobe"]),
+        .executable(name: "DisplayLite", targets: ["DisplayLite"])
     ],
     targets: [
         .target(name: "DDCKit", linkerSettings: [.linkedFramework("IOKit")]),
-        .executableTarget(name: "ddcprobe", dependencies: ["DDCKit"])
+        .executableTarget(name: "ddcprobe", dependencies: ["DDCKit"]),
+        .executableTarget(name: "DisplayLite", dependencies: ["DDCKit"],
+                          linkerSettings: [.linkedFramework("AppKit")])
     ]
 )

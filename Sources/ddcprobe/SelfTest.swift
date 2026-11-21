@@ -20,6 +20,39 @@ struct ProtocolChecks {
     func attempt(_ raw: [UInt8], write: Int32 = 0, read: Int32? = 0) -> ReadAttempt {
         ReadAttempt(number: 1, raw: raw, writeStatus: write, readStatus: read, vcp: 0x10)
     }
+    func testSliderLogic() throws {
+        try check(SliderLogic.maximum(reported: nil, fallback: 50) == 50)
+        try check(SliderLogic.maximum(reported: 0, fallback: 100) == 100)
+        try check(SliderLogic.maximum(reported: 75, fallback: 100) == 75)
+        for maximum: UInt16 in [50, 75, 100, 65535] {
+            for value: UInt16 in [0, maximum / 2, maximum] {
+                try check(SliderLogic.value(position: SliderLogic.position(value: value, maximum: maximum), maximum: maximum) == value)
+            }
+        }
+        try check(SliderLogic.value(position: 0.5, maximum: 50) == 25)
+        try check(SliderLogic.value(position: -1, maximum: 100) == 0)
+        try check(SliderLogic.value(position: 2, maximum: 50) == 50)
+        try check(SliderLogic.value(position: .nan, maximum: 50) == 0)
+        try check(SliderLogic.position(value: 80, maximum: 50) == 1)
+        try check(SliderLogic.position(value: 1, maximum: 0) == 0)
+    }
+    func testThrottle() throws {
+        try check(SliderLogic.shouldWrite(now: 0, lastWrite: nil, isFinal: false))
+        try check(!SliderLogic.shouldWrite(now: 0.08, lastWrite: 0, isFinal: false))
+        try check(SliderLogic.shouldWrite(now: 0.09, lastWrite: 0, isFinal: false))
+        try check(SliderLogic.shouldWrite(now: 0.01, lastWrite: 0, isFinal: true))
+        try check(SliderLogic.shouldWrite(now: 0, lastWrite: 0, isFinal: true))
+        // A burst admits only the first and the event after 90ms, plus release.
+        var last: Double?
+        var admitted = 0
+        for now in [0.0, 0.02, 0.04, 0.06, 0.08, 0.10] {
+            if SliderLogic.shouldWrite(now: now, lastWrite: last, isFinal: false) {
+                last = now; admitted += 1
+            }
+        }
+        try check(admitted == 2)
+        try check(SliderLogic.shouldWrite(now: 0.11, lastWrite: last, isFinal: true))
+    }
     func testKnownRequestVectors() throws {
         try check(DDCPacket.get(0x10, mode: .standard) == [0x82, 1, 0x10, 0xac])
         try check(DDCPacket.get(0x10) == [0x82, 1, 0x10, 0xfd])
@@ -101,6 +134,8 @@ struct ProtocolChecks {
 func runSelfTests() throws {
     let tests = ProtocolChecks()
     let groups: [(String, () throws -> Void)] = [
+        ("slider mapping and reported maxima", tests.testSliderLogic),
+        ("throttle and final release", tests.testThrottle),
         ("known request vectors", tests.testKnownRequestVectors),
         ("reply vectors, zero, 16-bit values", tests.testKnownReplyAndZero),
         ("malformed replies", tests.testMalformedReplies),

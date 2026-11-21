@@ -1,6 +1,6 @@
 # display-lite / ddcprobe
 
-Apple Silicon macOS 外接螢幕 DDC/CI 探測工具，目標環境為 M2、macOS 26、BenQ MA270U USB-C / DisplayPort Alt Mode。`DDCKit` 是可供未來選單列程式共用的同步核心；`ddcprobe` 是 CLI。無第三方相依，僅使用 Foundation、IOKit 與系統函式庫，不需完整 Xcode。
+Apple Silicon macOS 外接螢幕 DDC/CI 探測工具，目標環境為 M2、macOS 26、BenQ MA270U USB-C / DisplayPort Alt Mode。`DDCKit` 是共用同步核心；`ddcprobe` 是 CLI；`DisplayLite` 是 AppKit 原生選單列程式。無第三方相依，僅使用 AppKit、Foundation、IOKit 與系統函式庫，不需完整 Xcode。
 
 ## 編譯與使用
 
@@ -32,7 +32,7 @@ VCP 碼一律十六進位（`10` 與 `0x10` 相同），set 值為十進位 UInt
 
 ## 已知限制與參考
 
-私有 API 透過 `dlsym` 載入，採 CF retained ownership；未做實機 I2C 測試。macOS 升級可能改變 ABI、registry 結構或存取權限。內建螢幕、Intel、DisplayLink 不支援；不保證 dock／轉接器／MST 能運作。列的是 IOKit 端點，不是已確認對應的 CGDisplayID；名稱及 EDID 屬性只從端點及祖先取用，缺少時顯示 unknown，避免跨分支誤配其他螢幕。
+私有 API 透過 `dlsym` 載入，採 CF retained ownership；核心已在 M2／macOS 26／BenQ MA270U 實機驗證亮度、對比與音量讀寫，GUI 仍待實機驗證。macOS 升級可能改變 ABI、registry 結構或存取權限。內建螢幕、Intel、DisplayLink 不支援；不保證 dock／轉接器／MST 能運作。列的是 IOKit 端點，不是已確認對應的 CGDisplayID；名稱及 EDID 屬性只從端點及祖先取用，缺少時顯示 unknown，避免跨分支誤配其他螢幕。
 
 Get VCP 預設採 [MonitorControl Arm64DDC](https://github.com/MonitorControl/MonitorControl/blob/main/MonitorControl/Support/Arm64DDC.swift) 的 Apple Silicon checksum 慣例：Get 省略 source 0x51，Set 則包含。若 get／scan 無有效回覆，可加 `--standard-checksum` 比較標準封包；不會自動混用兩種結果。能力查詢採標準 checksum，分段格式亦參考 [ddcutil 封包實作](https://github.com/rockowitz/ddcutil/blob/master/src/base/ddc_packets.c)。這些差異與 MA270U 的 capabilities 分段行為仍需實機確認。
 
@@ -49,4 +49,21 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="
 
 ## 測試結果
 
-本機 CLT 的 `swift test` 無法匯入 `XCTest` 或 `Testing`，因此依備案使用 `ddcprobe selftest`，不保留無法編譯的 test target。`Sources/ddcprobe/SelfTest.swift` 包含 7 組純函式檢查：獨立已知封包向量、checksum／長度／VCP／狀態錯誤、零值與衝突採信、I2C 失敗排除、分段 offset／拼接／空段與 NUL 終止／溢位，以及完整 32-byte 分段。selftest 不枚舉或存取螢幕；檢查失敗會以非零狀態結束，release build 也不會移除檢查。
+本機 CLT 的 `swift test` 無法匯入 `XCTest` 或 `Testing`，因此依備案使用 `ddcprobe selftest`，不保留無法編譯的 test target。`Sources/ddcprobe/SelfTest.swift` 包含 9 組純函式檢查：滑桿範圍／換算、90ms 節流與放開強制送出、獨立已知封包向量、checksum／長度／VCP／狀態錯誤、零值與衝突採信、I2C 失敗排除、分段 offset／拼接／空段與 NUL 終止／溢位，以及完整 32-byte 分段。selftest 不枚舉或存取螢幕；檢查失敗會以非零狀態結束，release build 也不會移除檢查。
+
+## DisplayLite 選單列程式
+
+只需 Command Line Tools，不需 Xcode、XCTest 或第三方套件：
+
+```sh
+swift build
+.build/debug/DisplayLite
+```
+
+程式不顯示在 Dock，點選選單列太陽圖示即可調整亮度（0x10）、對比（0x12）、音量（0x62），最下方「結束」可退出。三項數值使用螢幕回報的 max；尚無有效 max 時分別使用 100／100／50。讀取失敗保留上次成功值與範圍，數字顯示「—」。
+
+僅在開啟選單時重新偵測並讀取三項數值（沿用核心重試與共識採信，約需 1.5 秒）；讀取期間停用滑桿，快速重開會共用尚未完成的讀取。所有 DDC 工作都在同一條背景序列佇列，閒置無輪詢、無常駐計時器。拖動中每 90ms 最多接受一次設定，放開必定送出最後值；鍵盤調整直接送出。GUI 每次設定只傳送一次，避免核心預設的重複傳送超出拖動節流頻率；CLI 的預設行為不變。設定後不立即回讀；下次開選單若距上次設定不足 200ms，背景佇列會先稍候再讀。成功設定僅代表 I2C 傳送成功，不保證螢幕已套用。
+
+沒有可開啟的外接端點時顯示「沒有偵測到可控制的螢幕」並停用滑桿，下次開選單重新偵測。目前僅控制單一可用端點；多個端點時顯示提示並停用，避免誤寫。更換端點會清除前一台螢幕快取。
+
+目前還沒有 `.app` 包裝、沒有開機自動啟動；色彩模式與全域鍵盤按鍵之後才做。請暫停 Display Pilot 等其他 DDC 程式以免互相干擾。選單滑桿拖曳／放開、拔插螢幕與螢幕忙碌時的行為仍需實機驗證。
