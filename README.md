@@ -57,9 +57,19 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="
 只需 Command Line Tools，不需 Xcode、XCTest 或第三方套件：
 
 ```sh
-swift build
-.build/debug/DisplayLite
+scripts/make-app.sh
+open dist/DisplayLite.app
 ```
+
+打包腳本先清除舊的 `dist/DisplayLite.app`，編譯 release 版、建立 bundle，以 `com.jung.displaylite` 做 ad-hoc 簽章並驗證，最後印出完整路徑。產物最低支援 macOS 14.0。請透過 `.app` 啟動，避免直接從終端機執行 binary 時，輔助使用權限歸屬終端機。
+
+若 sandbox 阻擋使用者快取，沿用 repo 內快取做法：
+
+```sh
+CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/module-cache" scripts/make-app.sh --disable-sandbox --cache-path .build/swiftpm-cache
+```
+
+要設為登入時啟動：到「系統設定 → 一般 → 登入項目」，手動加入 `dist/DisplayLite.app`，並保留 app 所在路徑。腳本不會修改登入項目。
 
 程式不顯示在 Dock，點選選單列太陽圖示即可調整亮度（0x10）、對比（0x12）、音量（0x62），最下方「結束」可退出。三項數值使用螢幕回報的 max；尚無有效 max 時分別使用 100／100／50。讀取失敗保留上次成功值與範圍，數字顯示「—」。
 
@@ -71,7 +81,7 @@ swift build
 
 沒有可開啟的外接端點時顯示「沒有偵測到可控制的螢幕」並停用滑桿與模式選項，下次開選單重新偵測。目前僅控制單一可用端點；多個端點時顯示提示並停用，避免誤寫。更換端點會清除前一台螢幕快取。
 
-目前還沒有 `.app` 包裝、沒有開機自動啟動；全域媒體鍵與亮度同步已加入，仍待本機實測。請暫停 Display Pilot 等其他 DDC 程式以免互相干擾。選單滑桿拖曳／放開、拔插螢幕與螢幕忙碌時的行為仍需實機驗證。
+已提供 `.app` 打包，可手動加入登入項目；全域媒體鍵與亮度同步已加入，仍待本機實測。請暫停 Display Pilot 等其他 DDC 程式以免互相干擾。選單滑桿拖曳／放開、拔插螢幕與螢幕忙碌時的行為仍需實機驗證。
 
 ## 系統媒體鍵與亮度同步
 
@@ -79,7 +89,7 @@ swift build
 
 ### 權限與按鍵
 
-啟動只用 `AXIsProcessTrusted` 檢查輔助使用權限，**不自動跳詢問**。沒有權限時不建立 tap；點選「啟用鍵盤按鍵控制（需要輔助使用權限）…」才呼叫 `AXIsProcessTrustedWithOptions`。在「系統設定 → 隱私權與安全性 → 輔助使用」授權後，再打開 DisplayLite 選單即可重新檢查並建立監聽。若權限已開啟但 tap 建立失敗，選單提供重新啟用。未包裝／未固定簽章的 CLI 執行檔，其權限歸屬及重新編譯後是否需再次授權，須由實機確認。
+啟動只用 `AXIsProcessTrusted` 檢查輔助使用權限，**不自動跳詢問**。沒有權限時不建立 tap；點選「啟用鍵盤按鍵控制（需要輔助使用權限）…」才呼叫 `AXIsProcessTrustedWithOptions`。在「系統設定 → 隱私權與安全性 → 輔助使用」授權後，再打開 DisplayLite 選單即可重新檢查並建立監聽。若權限已開啟但 tap 建立失敗，選單提供重新啟用。請授權打包後的 DisplayLite.app。ad-hoc 簽章下每次重新打包，系統可能把它當成新程式，需要到「系統設定 → 隱私權與安全性 → 輔助使用」重新允許，必要時先把舊的那筆移除，再加入新的 app。
 
 監聽 `NX_SYSDEFINED`、subtype 8 的音量加減、靜音與亮度加減，包含按下、按住連發及放開。tap 被 timeout 或 user input 停用時重新啟用。一般 F1/F2 功能鍵事件不在監聽範圍；鍵盤需送出系統亮度／媒體鍵事件。
 
@@ -92,7 +102,7 @@ swift build
 
 ### 亮度跟隨 MacBook
 
-選單「亮度跟隨 MacBook」預設開啟，以 `UserDefaults` 的 `followMacBookBrightness` 記住選擇。內建亮度 `b`（0–1）對應外接 `0x10 = round(b × max)`；滑桿仍可手動拖曳，下次內建亮度變化會再覆蓋。相同 VCP 值不重送；通知密集時節流並以一次性尾端工作保留最新值，關閉同步、手動調亮度或螢幕配置變更會取消待送出的同步值。
+選單「亮度跟隨 MacBook」預設開啟，以 `UserDefaults.standard` 的 `followMacBookBrightness` 記住選擇；透過 `.app` 啟動時使用 bundle id `com.jung.displaylite` 作為偏好設定 domain，既有 CLI 的設定不會自動搬移。內建亮度 `b`（0–1）對應外接 `0x10 = round(b × max)`；滑桿仍可手動拖曳，下次內建亮度變化會再覆蓋。相同 VCP 值不重送；通知密集時節流並以一次性尾端工作保留最新值，關閉同步、手動調亮度或螢幕配置變更會取消待送出的同步值。
 
 從 `/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices` 使用 `dlopen`／`dlsym` 找以下符號，不直接連結私有框架：
 
